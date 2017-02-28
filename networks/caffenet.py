@@ -23,8 +23,8 @@ class CaffeNet(Net):
         self._range_scale = 1.0      # not needed; image already in [0,255]
 
         #ULF[todo]: explain, make this a setting
-        #ULF:self._net_channel_swap = (2,1,0)
-        self._net_channel_swap = None
+        self._net_channel_swap = (2,1,0)
+        #self._net_channel_swap = None
         if self._net_channel_swap:
             self._net_channel_swap_inv = tuple([self._net_channel_swap.index(ii) for ii in range(len(self._net_channel_swap))])
         else:
@@ -221,7 +221,7 @@ class CaffeNet(Net):
         # (as net.inputs is a list ['data'])
         return self.net.blobs[self.net.inputs[0]].data.shape[-2:]   # e.g. 227x227
 
-    def get_input_diff(self, layer_id, flatten = False):
+    def get_input_diff(self, flatten = False):
         return self.net.blobs[self.net.inputs[0]].diff
 
     def get_layer_data(self, layer_id, unit = None, flatten = False):
@@ -234,7 +234,8 @@ class CaffeNet(Net):
 
     def get_layer_zeros(self, layer_id):
         #hack:
-        return self.net.blobs[backprop_layer].diff * 0
+        #return self.net.blobs[backprop_layer].diff * 0
+        return self.net.blobs[layer_id].diff * 0
 
     def preproc_forward(self, img, data_hw):
         appropriate_shape = data_hw + (3,)
@@ -246,7 +247,7 @@ class CaffeNet(Net):
         return output
 
 
-    def backward_from_layer(layer_id, diffs):
+    def backward_from_layer(self, layer_id, diffs):
         '''Compute backward gradients from layer.
 
         Notice: this method relies on the methond deconv_from_layer(),
@@ -260,13 +261,13 @@ class CaffeNet(Net):
         #print '**** Doing backprop with %s diffs in [%s,%s]' % (backprop_layer, diffs.min(), diffs.max())
         try:
             #ULF[old]:
-            self.net.backward_from_layer(backprop_layer, diffs, zero_higher = True)
+            self.net.backward_from_layer(layer_id, diffs, zero_higher = True)
         except AttributeError:
             print 'ERROR: required bindings (backward_from_layer) not found! Try using the deconv-deep-vis-toolbox branch as described here: https://github.com/yosinski/deep-visualization-toolbox'
             raise
 
 
-    def deconv_from_layer(backprop_layer, diffs):
+    def deconv_from_layer(self, layer_id, diffs):
         '''Compute backward gradients from layer.
 
 
@@ -279,13 +280,13 @@ class CaffeNet(Net):
         '''
         #print '**** Doing deconv with %s diffs in [%s,%s]' % (backprop_layer, diffs.min(), diffs.max())
         try:
-            self.net.deconv_from_layer(backprop_layer, diffs, zero_higher = True)
+            self.net.deconv_from_layer(layer_id, diffs, zero_higher = True)
         except AttributeError:
             print 'ERROR: required bindings (deconv_from_layer) not found! Try using the deconv-deep-vis-toolbox branch as described here: https://github.com/yosinski/deep-visualization-toolbox'
             raise
 
 
-    def get_input_gradient_as_image():
+    def get_input_gradient_as_image(self):
         #ULF[old]:
         #grad_blob = self.net.blobs['data'].diff
         grad_blob = self.get_input_diff()

@@ -137,8 +137,8 @@ default_installed_apps = (
 )
 installed_apps = locals().get('installed_apps', default_installed_apps)
 
-# String specifying the network class to use.
-default_network = 'networks.CaffeNet'
+# A tuple specifying the network class to use.
+default_network = ('networks', 'CaffeNet')
 network = locals().get('network', default_network)
 
 # Silence the caffe initialization.
