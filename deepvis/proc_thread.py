@@ -3,18 +3,36 @@ import cv2
 
 from codependent_thread import CodependentThread
 from misc import WithTimer
-from caffevis_helper import net_preproc_forward
 
 
 
-class CaffeProcThread(CodependentThread):
-    '''Runs Caffe in separate thread.'''
+class ProcThread(CodependentThread):
+    '''Runs Caffe in separate thread.
+    '''
 
-    def __init__(self, net, state, loop_sleep, pause_after_keys, heartbeat_required, mode_gpu):
+
+    def __init__(self, my_net, state, loop_sleep, pause_after_keys, heartbeat_required, mode_gpu):
+        '''Initialize this CaffeProcThread.
+        Arguments:
+        :param net:
+        :param state:
+            an instance of CaffeVisAppState, to coordinate with the rest of
+            the application.
+        :param loop_sleep:
+            time to sleep in main loop if no work is to be done.
+        :param pause_after_keys:
+            the minimal amount of time to wait before starting
+            processing after a key was pressed
+        :param heartbeat_required:
+        :param mode_gpu:
+        '''
         CodependentThread.__init__(self, heartbeat_required)
         self.daemon = True
-        self.net = net
-        self.input_dims = self.net.blobs['data'].data.shape[2:4]    # e.g. (227,227)
+        #ULF[old]
+        #self.net = net
+        self.my_net = my_net
+        #self.input_dims = self.net.blobs['data'].data.shape[2:4]    # e.g. (227,227)
+        self.input_dims = my_net.get_input_data_shape()
         self.state = state
         self.last_process_finished_at = None
         self.last_process_elapsed = None
@@ -26,6 +44,8 @@ class CaffeProcThread(CodependentThread):
         self.mode_gpu = mode_gpu      # Needed so the mode can be set again in the spawned thread, because there is a separate Caffe object per thread.
         
     def run(self):
+        '''Run this CaffeProcThread.
+        '''
         print 'CaffeProcThread.run called'
         frame = None
 
@@ -82,29 +102,23 @@ class CaffeProcThread(CodependentThread):
                 self.frames_processed_fwd += 1
                 im_small = cv2.resize(frame, self.input_dims)
                 with WithTimer('CaffeProcThread:forward', quiet = self.debug_level < 1):
-                    net_preproc_forward(self.net, im_small, self.input_dims)
+                    self.my_net.preproc_forward(im_small, self.input_dims)
 
             if run_back:
-                diffs = self.net.blobs[backprop_layer].diff * 0
-                diffs[0][backprop_unit] = self.net.blobs[backprop_layer].data[0,backprop_unit]
+                #ULF[old]:
+                #diffs = self.net.blobs[backprop_layer].diff * 0
+                diffs = get_layer_zeros(backprop_layer)
+                #diffs[0][backprop_unit] = self.net.blobs[backprop_layer].data[0,backprop_unit]
+                diffs[0][backprop_unit] = self.my_net.get_layer_data(backprop_layer, unit = backprop_unit)
 
                 assert back_mode in ('grad', 'deconv')
                 if back_mode == 'grad':
                     with WithTimer('CaffeProcThread:backward', quiet = self.debug_level < 1):
-                        #print '**** Doing backprop with %s diffs in [%s,%s]' % (backprop_layer, diffs.min(), diffs.max())
-                        try:
-                            self.net.backward_from_layer(backprop_layer, diffs, zero_higher = True)
-                        except AttributeError:
-                            print 'ERROR: required bindings (backward_from_layer) not found! Try using the deconv-deep-vis-toolbox branch as described here: https://github.com/yosinski/deep-visualization-toolbox'
-                            raise
+                        self.my_net.backward_from_layer(backprop_layer, diffs)
+
                 else:
                     with WithTimer('CaffeProcThread:deconv', quiet = self.debug_level < 1):
-                        #print '**** Doing deconv with %s diffs in [%s,%s]' % (backprop_layer, diffs.min(), diffs.max())
-                        try:
-                            self.net.deconv_from_layer(backprop_layer, diffs, zero_higher = True)
-                        except AttributeError:
-                            print 'ERROR: required bindings (deconv_from_layer) not found! Try using the deconv-deep-vis-toolbox branch as described here: https://github.com/yosinski/deep-visualization-toolbox'
-                            raise
+                        self.my_net.deconv_from_layer(backprop_layer, diffs)
 
                 with self.state.lock:
                     self.state.back_stale = False

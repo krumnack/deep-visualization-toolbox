@@ -4,7 +4,7 @@ import numpy as np
 
 from codependent_thread import CodependentThread
 from image_misc import caffe_load_image, ensure_uint255_and_resize_to_fit
-from caffevis_helper import crop_to_corner
+from app_helper import crop_to_corner
 
 
 
@@ -14,6 +14,14 @@ class JPGVisLoadingThread(CodependentThread):
     '''
 
     def __init__(self, settings, state, cache, loop_sleep, heartbeat_required):
+        '''Initialization.
+        Arguments:
+        :param settings:
+        :parem state:
+        :parem cache:
+        :parem loop_sleep:
+        :parem heartbeat_required:
+        '''
         CodependentThread.__init__(self, heartbeat_required)
         self.daemon = True
         self.settings = settings

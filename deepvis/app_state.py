@@ -1,23 +1,31 @@
 import time
+
 from threading import Lock
 
+class VisAppState(object):
 
-
-class CaffeVisAppState(object):
-    '''State of CaffeVis app.'''
-
-    def __init__(self, net, settings, bindings, net_layer_info):
+    def __init__(self, my_net, settings, bindings):
+        '''
+        Arguments:
+        :param net:
+            an instance of Caffe.Classifier.
+        :param settings: the settings object to be used to configure
+            this application
+        :param key_bindings: the key_bindings object assigning
+            key_codes to tags
+        '''
         self.lock = Lock()  # State is accessed in multiple threads
         self.settings = settings
         self.bindings = bindings
-        self._layers = net.blobs.keys()
-        self._layers = self._layers[1:]  # chop off data layer
+        self.my_net = my_net
+        self._layers = my_net.get_layer_ids(include_input = False)
         if hasattr(self.settings, 'caffevis_filter_layers'):
             for name in self._layers:
                 if self.settings.caffevis_filter_layers(name):
                     print '  Layer filtered out by caffevis_filter_layers: %s' % name
             self._layers = filter(lambda name: not self.settings.caffevis_filter_layers(name), self._layers)
-        self.net_layer_info = net_layer_info
+        #ULF[old]:
+        #self.net_layer_info = net_layer_info
         self.layer_boost_indiv_choices = self.settings.caffevis_boost_indiv_choices   # 0-1, 0 is noop
         self.layer_boost_gamma_choices = self.settings.caffevis_boost_gamma_choices   # 0-inf, 1 is noop
         self.caffe_net_state = 'free'     # 'free', 'proc', or 'draw'
@@ -30,15 +38,59 @@ class CaffeVisAppState(object):
 
         self._reset_user_state()
 
+
+
+
     def _reset_user_state(self):
+        '''Reset the state of the application.
+
+        Resetting the state includes the following aspects:
+            * select the first layer
+            * the cursor is place in the top area (layer selection)
+            * boost values are reset
+        '''
         self.layer_idx = 0
         self.layer = self._layers[0]
-        self.layer_boost_indiv_idx = self.settings.caffevis_boost_indiv_default_idx
-        self.layer_boost_indiv = self.layer_boost_indiv_choices[self.layer_boost_indiv_idx]
-        self.layer_boost_gamma_idx = self.settings.caffevis_boost_gamma_default_idx
-        self.layer_boost_gamma = self.layer_boost_gamma_choices[self.layer_boost_gamma_idx]
-        self.cursor_area = 'top'   # 'top' or 'bottom'
+
+        # initialize the cursor area:
+        # 'top' (layer selection) or 'bottom' (units)
+        self.cursor_area = 'top'
         self.selected_unit = 0
+
+        #
+        # Set display properties to defaults
+        # (some defaults can be obtained from the settings object)
+        #
+
+        # Whether or not to show desired patterns instead of
+        # activations in layers pane
+        self.pattern_mode = False
+
+        # layers_pane_zoom_mode:
+        #   0: off,
+        #   1: zoom selected (and show pref in small pane),
+        #   2: zoom backprop
+        self.layers_pane_zoom_mode = 0
+        # layers_show_back:
+        #   False: show forward activations.
+        #   True: show backward diffs
+        self.layers_show_back = False
+
+        self.show_label_predictions = self.settings.caffevis_init_show_label_predictions
+        self.show_unit_jpgs = self.settings.caffevis_init_show_unit_jpgs
+
+
+        self._layer_boost_indiv_idx = self.settings.caffevis_boost_indiv_default_idx
+        self.layer_boost_indiv = self.layer_boost_indiv_choices[self._layer_boost_indiv_idx]
+        self._layer_boost_gamma_idx = self.settings.caffevis_boost_gamma_default_idx
+        self.layer_boost_gamma = self.layer_boost_gamma_choices[self._layer_boost_gamma_idx]
+
+
+
+        #
+        # Back propagation:
+        #
+        
         # Which layer and unit (or channel) to use for backprop
         self.backprop_layer = self.layer
         self.backprop_unit = self.selected_unit
@@ -46,16 +98,29 @@ class CaffeVisAppState(object):
         self.back_enabled = False
         self.back_mode = 'grad'      # 'grad' or 'deconv'
         self.back_filt_mode = 'raw'  # 'raw', 'gray', 'norm', 'normblur'
-        self.pattern_mode = False    # Whether or not to show desired patterns instead of activations in layers pane
-        self.layers_pane_zoom_mode = 0       # 0: off, 1: zoom selected (and show pref in small pane), 2: zoom backprop
-        self.layers_show_back = False   # False: show forward activations. True: show backward diffs
-        self.show_label_predictions = self.settings.caffevis_init_show_label_predictions
-        self.show_unit_jpgs = self.settings.caffevis_init_show_unit_jpgs
-        self.drawing_stale = True
+        
+        
+        # additional message to be displayed in the status bar
         kh,_ = self.bindings.get_key_help('help_mode')
         self.extra_msg = '%s for help' % kh[0]
+
+        self.drawing_stale = True
+
         
     def handle_key(self, key):
+        '''Handle keyboard events.
+
+        The VisAppState is interested in keys that change the visual
+        state of the applications, i.e.:
+            * select a new unit using the cursor keys (sel_*)
+            * select a new layers (sel_layer_* = [u/o])
+            * switch between forward/backward/deconv mode
+            * activate zoom mode (zoom_mode = [z])
+            * toggle the display labels (toggle_label_predictions = [8])
+            * toggle display of precomputed unit jpegs (toggle_unit_jpgs = [9])
+            * ...
+            * reset the state (reset_state = [esc])
+        '''
         #print 'Ignoring key:', key
         if key == -1:
             return key
@@ -64,6 +129,8 @@ class CaffeVisAppState(object):
             key_handled = True
             self.last_key_at = time.time()
             tag = self.bindings.get_tag(key)
+            print 'debug[key]:', key, '(', tag, ') at', self.last_key_at
+            
             if tag == 'reset_state':
                 self._reset_user_state()
             elif tag == 'sel_layer_left':
@@ -78,7 +145,6 @@ class CaffeVisAppState(object):
                 #self.cursor_area = 'top' # Then to the control pane
                 self.layer_idx = min(len(self._layers) - 1, self.layer_idx + 1)
                 self.layer = self._layers[self.layer_idx]
-
             elif tag == 'sel_left':
                 self.move_selection('left')
             elif tag == 'sel_right':
@@ -98,11 +164,11 @@ class CaffeVisAppState(object):
                 self.move_selection('up', self.settings.caffevis_fast_move_dist)
 
             elif tag == 'boost_individual':
-                self.layer_boost_indiv_idx = (self.layer_boost_indiv_idx + 1) % len(self.layer_boost_indiv_choices)
-                self.layer_boost_indiv = self.layer_boost_indiv_choices[self.layer_boost_indiv_idx]
+                self._layer_boost_indiv_idx = (self._layer_boost_indiv_idx + 1) % len(self.layer_boost_indiv_choices)
+                self.layer_boost_indiv = self.layer_boost_indiv_choices[self._layer_boost_indiv_idx]
             elif tag == 'boost_gamma':
-                self.layer_boost_gamma_idx = (self.layer_boost_gamma_idx + 1) % len(self.layer_boost_gamma_choices)
-                self.layer_boost_gamma = self.layer_boost_gamma_choices[self.layer_boost_gamma_idx]
+                self._layer_boost_gamma_idx = (self._layer_boost_gamma_idx + 1) % len(self.layer_boost_gamma_choices)
+                self.layer_boost_gamma = self.layer_boost_gamma_choices[self._layer_boost_gamma_idx]
             elif tag == 'pattern_mode':
                 self.pattern_mode = not self.pattern_mode
                 if self.pattern_mode and not hasattr(self.settings, 'caffevis_unit_jpg_dir'):
@@ -203,18 +269,26 @@ class CaffeVisAppState(object):
             if self.cursor_area == 'top':
                 self.cursor_area = 'bottom'
             else:
-                self.selected_unit += self.net_layer_info[self.layer]['tile_cols'] * dist
+                #ULF[old]:
+                #self.selected_unit += self.net_layer_info[self.layer]['tile_cols'] * dist
+                self.selected_unit += self.my_net.get_layer_tile_cols(self.layer) * dist
         elif direction == 'up':
             if self.cursor_area == 'top':
                 pass
             else:
-                self.selected_unit -= self.net_layer_info[self.layer]['tile_cols'] * dist
+                #ULF[old]:
+                #self.selected_unit -= self.net_layer_info[self.layer]['tile_cols'] * dist
+                self.selected_unit -= self.my_net.get_layer_tile_cols(self.layer) * dist
                 if self.selected_unit < 0:
-                    self.selected_unit += self.net_layer_info[self.layer]['tile_cols']
+                    #ULF[old]:
+                    #self.selected_unit += self.net_layer_info[self.layer]['tile_cols']
+                    self.selected_unit += self.my_net.get_layer_tile_cols(self.layer)
                     self.cursor_area = 'top'
 
     def _ensure_valid_selected(self):
-        n_tiles = self.net_layer_info[self.layer]['n_tiles']
+        #ULF[old]:
+        #n_tiles = self.net_layer_info[self.layer]['n_tiles']
+        n_tiles = self.my_net.get_layer_n_tiles(self.layer)
 
         # Forward selection
         self.selected_unit = max(0, self.selected_unit)
@@ -227,3 +301,7 @@ class CaffeVisAppState(object):
                 self.backprop_layer = self.layer
                 self.backprop_unit = self.selected_unit
                 self.back_stale = True    # If there is any change, back diffs are now stale
+
+
+
+

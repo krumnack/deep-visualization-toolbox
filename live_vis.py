@@ -25,8 +25,6 @@ class ImproperlyConfigured(Exception):
     pass
 
 
-
-
 class Pane(object):
     '''Hold info about one window pane (rectangular region within the main window)'''
 
@@ -47,19 +45,20 @@ class LiveVis(object):
     def __init__(self, settings):
         self.settings = settings
         self.bindings = bindings
-        
+      
         self.app_classes = OrderedDict()
         self.apps = OrderedDict()
         
         for module_path, app_name in settings.installed_apps:
             module = importlib.import_module(module_path)
-            print 'got module', module
+            print 'debug[app]: LiveVis.__init__: got module', module
             app_class  = getattr(module, app_name)
-            print 'got app', app_class
+            print 'debug[app]: LiveVis.__init__: got app', app_class
             self.app_classes[app_name] = app_class
 
         for app_name, app_class in self.app_classes.iteritems():
             app = app_class(settings, self.bindings)
+            print 'debug[app]: LiveVis.__init__: initialized app', app_name, 'as class', app_class
             self.apps[app_name] = app
         self.help_mode = False
         self.window_name = 'Deep Visualization Toolbox'    

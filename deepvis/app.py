@@ -1,5 +1,6 @@
 #! /usr/bin/env python
-# -*- coding: utf-8
+
+# created by ULF
 
 import sys
 import os
@@ -7,144 +8,204 @@ import cv2
 import numpy as np
 import time
 import StringIO
+import importlib
 
 from misc import WithTimer
 from numpy_cache import FIFOLimitedArrayCache
 from app_base import BaseApp
-from image_misc import norm01, norm01c, norm0255, tile_images_normalize, ensure_float01, tile_images_make_tiles, ensure_uint255_and_resize_to_fit, get_tiles_height_width, get_tiles_height_width_ratio
+from image_misc import norm01, norm01c, tile_images_normalize, ensure_float01, tile_images_make_tiles, ensure_uint255_and_resize_to_fit
 from image_misc import FormattedString, cv2_typeset_text, to_255
-from caffe_proc_thread import CaffeProcThread
+from app_helper import get_pretty_layer_name, read_label_file, load_square_sprite_image
+
+
+from proc_thread import ProcThread
+from app_state import VisAppState
 from jpg_vis_loading_thread import JPGVisLoadingThread
-from caffevis_app_state import CaffeVisAppState
-from caffevis_helper import get_pretty_layer_name, read_label_file, load_sprite_image, load_square_sprite_image, check_force_backward_true
 
 
-
-class CaffeVisApp(BaseApp):
-    '''App to visualize using caffe.'''
+class VisApp(BaseApp):
+    '''Abstract base class for a visualization application.
+    Provides general methods but does not assume a
+    specific network library (like caffe or keras).
+    This class should be subclassed to implement support
+    for a specific framework.
+    '''
 
     def __init__(self, settings, key_bindings):
-        super(CaffeVisApp, self).__init__(settings, key_bindings)
+        '''Initialize a new visualization application.
+
+        Arguments:
+        :param settings: the settings object to be used to configure
+            this application
+        :param key_bindings: the key_bindings object assigning
+            key_codes to tags
+        '''
+        super(VisApp, self).__init__(settings, key_bindings)
+        
         print 'Got settings', settings
         self.settings = settings
         self.bindings = key_bindings
 
-        self._net_channel_swap = (2,1,0)
-        self._net_channel_swap_inv = tuple([self._net_channel_swap.index(ii) for ii in range(len(self._net_channel_swap))])
-        self._range_scale = 1.0      # not needed; image already in [0,255]
+        # for statistics/debugging, used in self.handle_input()
+        self.handled_frames = 0
 
-        # Set the mode to CPU or GPU. Note: in the latest Caffe
-        # versions, there is one Caffe object *per thread*, so the
-        # mode must be set per thread! Here we set the mode for the
-        # main thread; it is also separately set in CaffeProcThread.
-        sys.path.insert(0, os.path.join(settings.caffevis_caffe_root, 'python'))
-        import caffe
-        if settings.caffevis_mode_gpu:
-            caffe.set_mode_gpu()
-            print 'CaffeVisApp mode (in main thread):     GPU'
-        else:
-            caffe.set_mode_cpu()
-            print 'CaffeVisApp mode (in main thread):     CPU'
-        self.net = caffe.Classifier(
-            settings.caffevis_deploy_prototxt,
-            settings.caffevis_network_weights,
-            mean = None,                                 # Set to None for now, assign later         # self._data_mean,
-            channel_swap = self._net_channel_swap,
-            raw_scale = self._range_scale,
-        )
-
-        if isinstance(settings.caffevis_data_mean, basestring):
-            # If the mean is given as a filename, load the file
-            try:
-                self._data_mean = np.load(settings.caffevis_data_mean)
-            except IOError:
-                print '\n\nCound not load mean file:', settings.caffevis_data_mean
-                print 'Ensure that the values in settings.py point to a valid model weights file, network'
-                print 'definition prototxt, and mean. To fetch a default model and mean file, use:\n'
-                print '$ cd models/caffenet-yos/'
-                print '$ ./fetch.sh\n\n'
-                raise
-            input_shape = self.net.blobs[self.net.inputs[0]].data.shape[-2:]   # e.g. 227x227
-            # Crop center region (e.g. 227x227) if mean is larger (e.g. 256x256)
-            excess_h = self._data_mean.shape[1] - input_shape[0]
-            excess_w = self._data_mean.shape[2] - input_shape[1]
-            assert excess_h >= 0 and excess_w >= 0, 'mean should be at least as large as %s' % repr(input_shape)
-            self._data_mean = self._data_mean[:, (excess_h/2):(excess_h/2+input_shape[0]),
-                                              (excess_w/2):(excess_w/2+input_shape[1])]
-        elif settings.caffevis_data_mean is None:
-            self._data_mean = None
-        else:
-            # The mean has been given as a value or a tuple of values
-            self._data_mean = np.array(settings.caffevis_data_mean)
-            # Promote to shape C,1,1
-            while len(self._data_mean.shape) < 1:
-                self._data_mean = np.expand_dims(self._data_mean, -1)
-            
-            #if not isinstance(self._data_mean, tuple):
-            #    # If given as int/float: promote to tuple
-            #    self._data_mean = tuple(self._data_mean)
-        if self._data_mean is not None:
-            self.net.transformer.set_mean(self.net.inputs[0], self._data_mean)
-        
-        check_force_backward_true(settings.caffevis_deploy_prototxt)
-
-        self.labels = None
-        if self.settings.caffevis_labels:
-            self.labels = read_label_file(self.settings.caffevis_labels)
+        # to be initialized in self.start():
         self.proc_thread = None
         self.jpgvis_thread = None
-        self.handled_frames = 0
+
+        # initialize the image cache
+        # (ULF: shouldn't that be done by jpgvis_thread?)
         if settings.caffevis_jpg_cache_size < 10*1024**2:
             raise Exception('caffevis_jpg_cache_size must be at least 10MB for normal operation.')
         self.img_cache = FIFOLimitedArrayCache(settings.caffevis_jpg_cache_size)
 
-        self._populate_net_layer_info()
+        # read the class labels
+        self.labels = None
+        if self.settings.caffevis_labels:
+            self.labels = read_label_file(self.settings.caffevis_labels)
 
-    def _populate_net_layer_info(self):
-        '''For each layer, save the number of filters and precompute
-        tile arrangement (needed by CaffeVisAppState to handle
-        keyboard navigation).
+        network_path, network_class_name = self.settings.network
+        network_module = importlib.import_module(network_path)
+        print 'debug[app]: VisApp.__init__: got module', network_module
+        network_class  = getattr(network_module, network_class_name)
+        print 'debug[app]: VisApp.__init__: got class', network_class
+        self.my_net = network_class(self.settings)
+        # self.my_net = CaffeNet(self.settings)
+        self.my_net.check_force_backward_true()
+
+
+
+    def get_heartbeats(self):
+        '''Provide a list of threads the want to be heartbeated.
+
+        Result:
+            A list of heartbeat functions to be called on a regular basis.
         '''
-        self.net_layer_info = {}
-        for key in self.net.blobs.keys():
-            self.net_layer_info[key] = {}
-            # Conv example: (1, 96, 55, 55)
-            # FC example: (1, 1000)
-            blob_shape = self.net.blobs[key].data.shape
-            assert len(blob_shape) in (2,4), 'Expected either 2 for FC or 4 for conv layer'
-            self.net_layer_info[key]['isconv'] = (len(blob_shape) == 4)
-            self.net_layer_info[key]['data_shape'] = blob_shape[1:]  # Chop off batch size
-            self.net_layer_info[key]['n_tiles'] = blob_shape[1]
-            self.net_layer_info[key]['tiles_rc'] = get_tiles_height_width_ratio(blob_shape[1], self.settings.caffevis_layers_aspect_ratio)
-            self.net_layer_info[key]['tile_rows'] = self.net_layer_info[key]['tiles_rc'][0]
-            self.net_layer_info[key]['tile_cols'] = self.net_layer_info[key]['tiles_rc'][1]
+        return [self.proc_thread.heartbeat, self.jpgvis_thread.heartbeat]
+
+
+    def handle_key(self, key, panes):
+        '''Handle key events.
+
+        Result:
+            None if the key was processed, otherwise the key value to be
+            processed by some other handlers.
+        '''
+        return self.state.handle_key(key)
+
+
+    def get_back_what_to_disp(self):
+        '''Whether to show back diff information or stale or disabled
+        indicator.
+
+        Result:
+            'disabled' or 'stale' or 'normal'.
+        '''
+        if (self.state.cursor_area == 'top' and not self.state.backprop_selection_frozen) or not self.state.back_enabled:
+            return 'disabled'
+        elif self.state.back_stale:
+            return 'stale'
+        else:
+            return 'normal'
+
+    def set_debug(self, level):
+        '''Set the debug level.
+        Sets the debug level for this appliciation and the associated threads.
+        '''
+        self.debug_level = level
+        self.proc_thread.debug_level = level
+        self.jpgvis_thread.debug_level = level
+
+
+    def draw_help(self, help_pane, locy):
+        '''Tells the app to draw its help screen in the given pane.
+
+        :param help_pane:
+            a Pane to use for displaying the help for this application.
+        :param locy:
+            the vertical position within the help_pane.
+        '''
+        defaults = {'face':  getattr(cv2, self.settings.help_face),
+                    'fsize': self.settings.help_fsize,
+                    'clr':   to_255(self.settings.help_clr),
+                    'thick': self.settings.help_thick}
+        loc_base = self.settings.help_loc[::-1]   # Reverse to OpenCV c,r order
+        locx = loc_base[0]
+
+        lines = []
+        lines.append([FormattedString('', defaults)])
+        lines.append([FormattedString('Caffevis keys', defaults)])
+        
+        kl,_ = self.bindings.get_key_help('sel_left')
+        kr,_ = self.bindings.get_key_help('sel_right')
+        ku,_ = self.bindings.get_key_help('sel_up')
+        kd,_ = self.bindings.get_key_help('sel_down')
+        klf,_ = self.bindings.get_key_help('sel_left_fast')
+        krf,_ = self.bindings.get_key_help('sel_right_fast')
+        kuf,_ = self.bindings.get_key_help('sel_up_fast')
+        kdf,_ = self.bindings.get_key_help('sel_down_fast')
+
+        keys_nav_0 = ','.join([kk[0] for kk in (kl, kr, ku, kd)])
+        keys_nav_1 = ''
+        if len(kl)>1 and len(kr)>1 and len(ku)>1 and len(kd)>1:
+            keys_nav_1 += ' or '
+            keys_nav_1 += ','.join([kk[1] for kk in (kl, kr, ku, kd)])
+        keys_nav_f = ','.join([kk[0] for kk in (klf, krf, kuf, kdf)])
+        nav_string = 'Navigate with %s%s. Use %s to move faster.' % (keys_nav_0, keys_nav_1, keys_nav_f)
+        lines.append([FormattedString('', defaults, width=120, align='right'),
+                      FormattedString(nav_string, defaults)])
+            
+        for tag in ('sel_layer_left', 'sel_layer_right', 'zoom_mode', 'pattern_mode',
+                    'ez_back_mode_loop', 'freeze_back_unit', 'show_back', 'back_mode', 'back_filt_mode',
+                    'boost_gamma', 'boost_individual', 'reset_state'):
+            key_strings, help_string = self.bindings.get_key_help(tag)
+            label = '%10s:' % (','.join(key_strings))
+            lines.append([FormattedString(label, defaults, width=120, align='right'),
+                          FormattedString(help_string, defaults)])
+
+        locy = cv2_typeset_text(help_pane.data, lines, (locx, locy),
+                                line_spacing = self.settings.help_line_spacing)
+
+        return locy
+
 
     def start(self):
-        self.state = CaffeVisAppState(self.net, self.settings, self.bindings, self.net_layer_info)
+        '''Start the application.
+        The start procedure includes creating as an appropriate
+        VisAppState object, a processing thread as well as a jpgvis_thread.
+        The function returns after all those threads have been started.
+        '''
+
+        # initialize the application state
+        self.state = VisAppState(self.my_net, self.settings, self.bindings)
         self.state.drawing_stale = True
+
+        # get the pretty layer names
         self.layer_print_names = [get_pretty_layer_name(self.settings, nn) for nn in self.state._layers]
 
+        # start the processing thread
         if self.proc_thread is None or not self.proc_thread.is_alive():
             # Start thread if it's not already running
-            self.proc_thread = CaffeProcThread(self.net, self.state,
-                                               self.settings.caffevis_frame_wait_sleep,
-                                               self.settings.caffevis_pause_after_keys,
-                                               self.settings.caffevis_heartbeat_required,
-                                               self.settings.caffevis_mode_gpu)
+            self.proc_thread = ProcThread(self.my_net, self.state,
+                                          self.settings.caffevis_frame_wait_sleep,
+                                          self.settings.caffevis_pause_after_keys,
+                                          self.settings.caffevis_heartbeat_required,
+                                          self.settings.caffevis_mode_gpu)
             self.proc_thread.start()
 
+        # start the image loading thread
         if self.jpgvis_thread is None or not self.jpgvis_thread.is_alive():
             # Start thread if it's not already running
             self.jpgvis_thread = JPGVisLoadingThread(self.settings, self.state, self.img_cache,
                                                      self.settings.caffevis_jpg_load_sleep,
                                                      self.settings.caffevis_heartbeat_required)
             self.jpgvis_thread.start()
-                
 
-    def get_heartbeats(self):
-        return [self.proc_thread.heartbeat, self.jpgvis_thread.heartbeat]
             
     def quit(self):
+        '''End this application.
+        This also tries to stop all threads associated with this application.
+        '''
         print 'CaffeVisApp: trying to quit'
 
         with self.state.lock:
@@ -158,13 +219,20 @@ class CaffeVisApp(BaseApp):
             if self.proc_thread.is_alive():
                 raise Exception('CaffeVisApp: Could not join proc_thread; giving up.')
             self.proc_thread = None
-                
         print 'CaffeVisApp: quitting.'
-        
+
+
     def _can_skip_all(self, panes):
+        '''Check if all panes can be skipped.
+        This is the case iff panes do not contain the key 'caffevis_layers'.
+        '''
         return ('caffevis_layers' not in panes.keys())
-        
+
+
     def handle_input(self, input_image, panes):
+        '''Handle a given input image.
+        The image is stored as self.state.next_frame
+        '''
         if self.debug_level > 1:
             print 'handle_input: frame number', self.handled_frames, 'is', 'None' if input_image is None else 'Available'
         self.handled_frames += 1
@@ -221,8 +289,10 @@ class CaffeVisApp(BaseApp):
                 self.state.caffe_net_state = 'free'
         return do_draw
 
+
     def _draw_prob_labels_pane(self, pane):
-        '''Adds text label annotation atop the given pane.'''
+        '''Adds text label annotation atop the given pane.
+        '''
 
         if not self.labels or not self.state.show_label_predictions or not self.settings.caffevis_prob_layer:
             return
@@ -236,8 +306,12 @@ class CaffeVisApp(BaseApp):
         clr_0 = to_255(self.settings.caffevis_class_clr_0)
         clr_1 = to_255(self.settings.caffevis_class_clr_1)
 
-        probs_flat = self.net.blobs[self.settings.caffevis_prob_layer].data.flatten()
-        top_5 = probs_flat.argsort()[-1:-6:-1]
+        #ULF[old]:
+        #probs_flat = self.net.blobs[self.settings.caffevis_prob_layer].data.flatten()
+        probs_flat = self.my_net.get_layer_data(self.settings.caffevis_prob_layer, flatten = True)
+        
+        #top_5 = probs_flat.argsort()[-1:-6:-1]
+        top_5 = probs_flat.argsort()[-1:-8:-1]
 
         strings = []
         pmax = probs_flat[top_5[0]]
@@ -326,15 +400,21 @@ class CaffeVisApp(BaseApp):
         '''Returns the data shown in highres format, b01c order.'''
         
         if self.state.layers_show_back:
-            layer_dat_3D = self.net.blobs[self.state.layer].diff[0]
+            #ULF[old]:
+            #layer_dat_3D = self.net.blobs[self.state.layer].diff[0]
+            layer_dat_3D =  self.my_net.get_layer_diff(self.state.layer)
         else:
-            layer_dat_3D = self.net.blobs[self.state.layer].data[0]
+            #ULF[old]:
+            #layer_dat_3D = self.net.blobs[self.state.layer].data[0]
+            layer_dat_3D =  self.my_net.get_layer_data(self.state.layer)
         # Promote FC layers with shape (n) to have shape (n,1,1)
         if len(layer_dat_3D.shape) == 1:
             layer_dat_3D = layer_dat_3D[:,np.newaxis,np.newaxis]
 
         n_tiles = layer_dat_3D.shape[0]
-        tile_rows,tile_cols = self.net_layer_info[self.state.layer]['tiles_rc']
+        #ULF[old]:
+        #tile_rows,tile_cols = self.net_layer_info[self.state.layer]['tiles_rc']
+        tile_rows, tile_cols = self.my_net.get_layer_tiles_rc(self.state.layer)
 
         display_3D_highres = None
         if self.state.pattern_mode:
@@ -495,14 +575,8 @@ class CaffeVisApp(BaseApp):
 
         else:
             # One of the backprop modes is enabled and the back computation (gradient or deconv) is up to date
-            
-            grad_blob = self.net.blobs['data'].diff
 
-            # Manually deprocess (skip mean subtraction and rescaling)
-            #grad_img = self.net.deprocess('data', diff_blob)
-            grad_blob = grad_blob[0]                    # bc01 -> c01
-            grad_blob = grad_blob.transpose((1,2,0))    # c01 -> 01c
-            grad_img = grad_blob[:, :, self._net_channel_swap_inv]  # e.g. BGR -> RGB
+            grad_img = self.my_net.get_input_gradient_as_image()
 
             # Mode-specific processing
             assert back_mode in ('grad', 'deconv')
@@ -565,64 +639,3 @@ class CaffeVisApp(BaseApp):
         else:
             # Will never be available
             pane.data[:] = to_255(self.settings.window_background)
-
-    def handle_key(self, key, panes):
-        return self.state.handle_key(key)
-
-    def get_back_what_to_disp(self):
-        '''Whether to show back diff information or stale or disabled indicator'''
-        if (self.state.cursor_area == 'top' and not self.state.backprop_selection_frozen) or not self.state.back_enabled:
-            return 'disabled'
-        elif self.state.back_stale:
-            return 'stale'
-        else:
-            return 'normal'
-
-    def set_debug(self, level):
-        self.debug_level = level
-        self.proc_thread.debug_level = level
-        self.jpgvis_thread.debug_level = level
-
-    def draw_help(self, help_pane, locy):
-        defaults = {'face':  getattr(cv2, self.settings.help_face),
-                    'fsize': self.settings.help_fsize,
-                    'clr':   to_255(self.settings.help_clr),
-                    'thick': self.settings.help_thick}
-        loc_base = self.settings.help_loc[::-1]   # Reverse to OpenCV c,r order
-        locx = loc_base[0]
-
-        lines = []
-        lines.append([FormattedString('', defaults)])
-        lines.append([FormattedString('Caffevis keys', defaults)])
-        
-        kl,_ = self.bindings.get_key_help('sel_left')
-        kr,_ = self.bindings.get_key_help('sel_right')
-        ku,_ = self.bindings.get_key_help('sel_up')
-        kd,_ = self.bindings.get_key_help('sel_down')
-        klf,_ = self.bindings.get_key_help('sel_left_fast')
-        krf,_ = self.bindings.get_key_help('sel_right_fast')
-        kuf,_ = self.bindings.get_key_help('sel_up_fast')
-        kdf,_ = self.bindings.get_key_help('sel_down_fast')
-
-        keys_nav_0 = ','.join([kk[0] for kk in (kl, kr, ku, kd)])
-        keys_nav_1 = ''
-        if len(kl)>1 and len(kr)>1 and len(ku)>1 and len(kd)>1:
-            keys_nav_1 += ' or '
-            keys_nav_1 += ','.join([kk[1] for kk in (kl, kr, ku, kd)])
-        keys_nav_f = ','.join([kk[0] for kk in (klf, krf, kuf, kdf)])
-        nav_string = 'Navigate with %s%s. Use %s to move faster.' % (keys_nav_0, keys_nav_1, keys_nav_f)
-        lines.append([FormattedString('', defaults, width=120, align='right'),
-                      FormattedString(nav_string, defaults)])
-            
-        for tag in ('sel_layer_left', 'sel_layer_right', 'zoom_mode', 'pattern_mode',
-                    'ez_back_mode_loop', 'freeze_back_unit', 'show_back', 'back_mode', 'back_filt_mode',
-                    'boost_gamma', 'boost_individual', 'reset_state'):
-            key_strings, help_string = self.bindings.get_key_help(tag)
-            label = '%10s:' % (','.join(key_strings))
-            lines.append([FormattedString(label, defaults, width=120, align='right'),
-                          FormattedString(help_string, defaults)])
-
-        locy = cv2_typeset_text(help_pane.data, lines, (locx, locy),
-                                line_spacing = self.settings.help_line_spacing)
-
-        return locy
