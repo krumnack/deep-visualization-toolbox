@@ -133,9 +133,19 @@ redraw_at_least_every = locals().get('redraw_at_least_every', 3)
 # instantiate for each app to be run. Apps are run and given keys to
 # handle in the order specified.
 default_installed_apps = (
-    ('caffevis.app', 'CaffeVisApp'),
+    ('deepvis.app', 'VisApp'),
 )
 installed_apps = locals().get('installed_apps', default_installed_apps)
+
+# String specifying the network class to use.
+default_network = 'networks.CaffeNet'
+network = locals().get('network', default_network)
+
+# Silence the caffe initialization.
+# Caffe outputs a lot of information when it reads in a Classfiert.
+# Setting caffe_init_silent to True will suppress this output, keeping the console clean.
+# (However, also warnings and error messages will be suppressed!)
+caffe_init_silent = True
 
 # Font settings for the help pane. Text is rendered using OpenCV; see
 # http://docs.opencv.org/2.4/modules/core/doc/drawing_functions.html#puttext
