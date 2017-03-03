@@ -2,26 +2,31 @@ import sys
 import os
 import numpy as np
 
-
 from net import Net
-
 
 # ULF[fixme]: does not belong to the network ...
 from image_misc import get_tiles_height_width_ratio
 
 
-
-
 class CaffeNet(Net):
 
     def __init__(self, settings):
-        '''Initialize the caffe network.
-        
-        '''
+        """Initialize the caffe network.
+
+        Initializing the caffe network includes two steps:
+        (1) importing the caffe library. We are interested in
+        the modified version that provides deconvolution support.
+        (2) load the caffe model data.
+
+        Arguments:
+        settings: The settings object to be used. CaffeNet will only
+        used settings prefixed with "caffe". ULF[todo]: check this claim!
+        """
         super(CaffeNet, self).__init__(settings)
 
         self._range_scale = 1.0      # not needed; image already in [0,255]
 
+        
         #ULF[todo]: explain, make this a setting
         self._net_channel_swap = (2,1,0)
         #self._net_channel_swap = None
@@ -31,13 +36,20 @@ class CaffeNet(Net):
             self._net_channel_swap_inv = None
 
 
-        # Set the mode to CPU or GPU. Note: in the latest Caffe
-        # versions, there is one Caffe object *per thread*, so the
-        # mode must be set per thread! Here we set the mode for the
-        # main thread; it is also separately set in CaffeProcThread.
+        # (1) import caffe library
+        #
         sys.path.insert(0, os.path.join(settings.caffevis_caffe_root, 'python'))
         import caffe
         print 'debug[caffe]: CaffeNet.__init__: using Caffe in', caffe.__file__
+
+        # Check if the imported caffe provides all required functions
+        self._check_caffe_version(caffe)
+        
+        # Set the mode to CPU or GPU.
+        # Note: in the latest Caffe versions, there is one Caffe object
+        # *per thread*, so the mode must be set per thread!
+        # Here we set the mode for the main thread; it is also separately
+        # set in CaffeProcThread.
         if settings.caffevis_mode_gpu:
             caffe.set_mode_gpu()
             print 'debug[caffe]: CaffeNet.__init__: CaffeVisApp mode (in main thread):     GPU'
@@ -46,7 +58,10 @@ class CaffeNet(Net):
             print 'debug[caffe]: CaffeNet.__init__: CaffeVisApp mode (in main thread):     CPU'
         print 'debug[caffe]: CaffeNet.__init__: Loading the classifier (', settings.caffevis_deploy_prototxt, settings.caffevis_network_weights, ') ...'
 
-        # FIXME[hack]: make Caffe silent - there should be a better
+
+        # (2) load the caffe model
+        #        
+        # ULF[hack]: make Caffe silent - there should be a better
         # (i.e. official) way to do so. We only want to suppress
         # the info (like network topology) while still seeing warnings
         # and errors!
@@ -81,9 +96,31 @@ class CaffeNet(Net):
 
         self._init_data_mean()
         self._populate_net_layer_info()
+        self._check_force_backward_true()
 
 
+    def _check_caffe_version(self, caffe):
+        """Check if the caffe version provides all required functions.
+
+        The deep visualization toolbox requires a modified version of
+        caffe, that supports deconvolution. Without this functions,
+        the toolbox is able to run, but will not provide full functionality.
+
+        This method will issue a warning, if caffe does not provide the
+        required functions.
+        """
+        if 'deconv_from_layer' in dir(caffe.classifier.Classifier):
+            print "debug[caffe]: caffe version provides all required functions. Good!"
+        else:
+            print "warning: Function 'deconv_from_layer' is missing in caffe. Probably you are using a wrong caffe version. Some functions will not be available!'"
+
+        
     def _init_data_mean(self):
+        """Initialize the data mean.
+
+        The data mean values are loaded from a separate file. Caffe can
+        use thes
+        """
         if isinstance(self.settings.caffevis_data_mean, basestring):
             # If the mean is given as a filename, load the file
             try:
@@ -120,7 +157,9 @@ class CaffeNet(Net):
 
 
     def _populate_net_layer_info(self):
-        '''For each layer, save the number of filters and precompute
+        """Prepare the layer infos.
+
+        For each layer, save the number of filters and precompute
         tile arrangement (needed by CaffeVisAppState to handle
         keyboard navigation).
 
@@ -134,7 +173,8 @@ class CaffeNet(Net):
             tile_cols (int):
 
         FIXME[caffe]: accesses net.blobs
-        '''
+        ULF: this should probably done by CaffeVisAppState itself ...
+        """
         print 'debug[caffe,net]: CaffeNet._populate_net_layer_info: Populating layer info ...'
         super(CaffeNet, self)._populate_net_layer_info()
         for key in self.net.blobs.keys():
@@ -170,10 +210,19 @@ class CaffeNet(Net):
             # fc8 :  (1, 1000)
             # prob :  (1, 1000)
 
-    def check_force_backward_true(self):
-        '''Checks whether the given file contains a line with the following text, ignoring whitespace:
-        force_backward: true
-        '''
+    def _check_force_backward_true(self):
+        """Check the force_backward flag is set in the caffe model definition.
+
+        Checks whether the given file contains a line with the
+        following text, ignoring whitespace:
+
+            force_backward: true
+
+        If this is not the case, a warning text will be issued.
+        
+        ULF: This method should not be called from outside, but it is still
+        called from "optimize_image.py"
+        """
         prototxt_file = self.settings.caffevis_deploy_prototxt
 
         found = False
@@ -193,13 +242,31 @@ class CaffeNet(Net):
             print 'at the data layer as well.\n\n'
 
 
+    def get_input_id(self):
+        """Get the identifier for the input layer.
 
+        Result: The type of this dentifier depends on the underlying
+            network library. However, the identifier returned by this
+            method is suitable as argument for other methods in this
+            class that expect a layer_id.
+
+        """
+        return self.net.inputs[0]
 
     def get_layer_ids(self, include_input = True):
-        """Get the layer identifiers of the network layers
+        """Get the layer identifiers of the network layers.
 
-        Result:
-            A list of identifiers (strings in the case of Caffe)
+        
+        Arguments:
+        include_input:
+            a flag indicating if the input layer should be
+            included in the result.
+        
+        Result: A list of identifiers (strings in the case of Caffe).
+            Notice that the type of these identifiers may depend on
+            the underlying network library. However, the identifiers
+            returned by this method should be suitable as arguments
+            for other methods in this class that expect a layer_id.
         """
         layers = self.net.blobs.keys()
         if not include_input:
@@ -207,37 +274,72 @@ class CaffeNet(Net):
         return layers
 
     def get_layer_n_tiles(self, layer_id):
+        """
+        ULF: only called by deepvis/app_state.py (1 time)
+        """
         return self.net_layer_info[layer_id]['n_tiles']
 
+
     def get_layer_tile_cols(self, layer_id):
+        """
+        ULF: only called by deepvis/app_state.py (3 times)
+        """
         return self.net_layer_info[layer_id]['tile_cols']
 
+
     def get_layer_tiles_rc(self, layer_id):
+        """
+        ULF: only called by deepvis/app_state.py (1 time)
+        """
         return self.net_layer_info[layer_id]['tiles_rc']
 
 
     def get_input_data_shape(self):
+        """
+        ULF: only called by deepvis/proc_thread.py (1 time),
+        and by self._init_data_mean()
+        """
         # self.net.inputs[0] is 'data'
         # (as net.inputs is a list ['data'])
         return self.net.blobs[self.net.inputs[0]].data.shape[-2:]   # e.g. 227x227
 
-    def get_input_diff(self, flatten = False):
-        return self.net.blobs[self.net.inputs[0]].diff
-
     def get_layer_data(self, layer_id, unit = None, flatten = False):
+        """Provide activation data for a given layer.
+        """
         data = self.net.blobs[layer_id].data
         return data.flatten() if flatten else (data[0] if unit is None else data[0,unit])
 
+
     def get_layer_diff(self, layer_id, flatten = False):
-        diff = self.net.blobs[layer_id].data
+        """Provide diff data for a given layer.
+        """
+        diff = self.net.blobs[layer_id].diff
         return diff.flatten() if flatten else diff[0]
 
+
     def get_layer_zeros(self, layer_id):
+        """
+        ULF: only called by deepvis/proc_thread.py (1 time)
+        ULF: there should be a better solution
+        """
         #hack:
         #return self.net.blobs[backprop_layer].diff * 0
         return self.net.blobs[layer_id].diff * 0
 
+
     def preproc_forward(self, img, data_hw):
+        """Prepare image data for processing.
+
+        Uses caffe.transformer.preprocess
+
+        Arguments:
+        img:
+        data_hw
+        
+        
+        ULF: called by deepvis/proc_thread.py
+        ULF: app_helper.py: provides a function with similar name
+        """
         appropriate_shape = data_hw + (3,)
         assert img.shape == appropriate_shape, 'img is wrong size (got %s but expected %s)' % (img.shape, appropriate_shape)
         #resized = caffe.io.resize_image(img, self.net.image_dims)   # e.g. (227, 227, 3)
@@ -287,14 +389,19 @@ class CaffeNet(Net):
 
 
     def get_input_gradient_as_image(self):
+        """
+        
+        ULF: only called by deepvis/proc_thread.py
+        """
         #ULF[old]:
         #grad_blob = self.net.blobs['data'].diff
-        grad_blob = self.get_input_diff()
-
+        #grad_blob = self.net.blobs[self.net.inputs[0]].diff
+        grad_blob = self.get_layer_diff(self.get_input_id())
+        print "debug[caffe]: grad_blob.shape =", grad_blob.shape
+        
         # Manually deprocess (skip mean subtraction and rescaling)
         #grad_img = self.net.deprocess('data', diff_blob)
-        grad_blob = grad_blob[0]                    # bc01 -> c01
+        #grad_blob = grad_blob[0]                    # bc01 -> c01
         grad_blob = grad_blob.transpose((1,2,0))    # c01 -> 01c
         grad_img = grad_blob[:, :, self._net_channel_swap_inv]  # e.g. BGR -> RGB
         return grad_img
-

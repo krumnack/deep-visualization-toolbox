@@ -71,7 +71,6 @@ class VisApp(BaseApp):
         print 'debug[app]: VisApp.__init__: got class', network_class
         self.my_net = network_class(self.settings)
         # self.my_net = CaffeNet(self.settings)
-        self.my_net.check_force_backward_true()
 
 
 
