@@ -4,9 +4,6 @@ import numpy as np
 
 from net import Net
 
-# ULF[fixme]: does not belong to the network ...
-from image_misc import get_tiles_height_width_ratio
-
 
 class CaffeNet(Net):
 
@@ -95,7 +92,6 @@ class CaffeNet(Net):
         print 'debug[caffe]: CaffeNet.__init__: ... loading completed.'
 
         self._init_data_mean()
-        self._populate_net_layer_info()
         self._check_force_backward_true()
 
 
@@ -156,60 +152,6 @@ class CaffeNet(Net):
             self.net.transformer.set_mean(self.net.inputs[0], data_mean)
 
 
-    def _populate_net_layer_info(self):
-        """Prepare the layer infos.
-
-        For each layer, save the number of filters and precompute
-        tile arrangement (needed by CaffeVisAppState to handle
-        keyboard navigation).
-
-        The net_layer_info values are dictionaries with the following
-        entries:
-            isconv (Boolean)
-            data_shape (tuple of ints): shape of the layer
-            n_tiles (int): the number of tiles to display
-            tiles_rc (pair of ints):
-            tile_rows (int):
-            tile_cols (int):
-
-        FIXME[caffe]: accesses net.blobs
-        ULF: this should probably done by CaffeVisAppState itself ...
-        """
-        print 'debug[caffe,net]: CaffeNet._populate_net_layer_info: Populating layer info ...'
-        super(CaffeNet, self)._populate_net_layer_info()
-        for key in self.net.blobs.keys():
-            self.net_layer_info[key] = {}
-            # Conv example: (1, 96, 55, 55)
-            # FC example: (1, 1000)
-            blob_shape = self.net.blobs[key].data.shape
-            print 'debug[caffe,net]: CaffeNet._populate_net_layer_info:', key, ": ", blob_shape
-
-            assert len(blob_shape) in (2,4), 'Expected either 2 for FC or 4 for conv layer'
-            self.net_layer_info[key]['isconv'] = (len(blob_shape) == 4)
-            self.net_layer_info[key]['data_shape'] = blob_shape[1:]  # Chop off batch size
-            self.net_layer_info[key]['n_tiles'] = blob_shape[1]
-            self.net_layer_info[key]['tiles_rc'] = get_tiles_height_width_ratio(blob_shape[1], self.settings.caffevis_layers_aspect_ratio)
-            self.net_layer_info[key]['tile_rows'] = self.net_layer_info[key]['tiles_rc'][0]
-            self.net_layer_info[key]['tile_cols'] = self.net_layer_info[key]['tiles_rc'][1]
-
-            # Caffe layers:
-            # Populating layer info ...
-            # data :  (1, 3, 227, 227)
-            # conv1 :  (1, 96, 55, 55)
-            # pool1 :  (1, 96, 27, 27)
-            # norm1 :  (1, 96, 27, 27)
-            # conv2 :  (1, 256, 27, 27)
-            # pool2 :  (1, 256, 13, 13)
-            # norm2 :  (1, 256, 13, 13)
-            # conv3 :  (1, 384, 13, 13)
-            # conv4 :  (1, 384, 13, 13)
-            # conv5 :  (1, 256, 13, 13)
-            # pool5 :  (1, 256, 6, 6)
-            # fc6 :  (1, 4096)
-            # fc7 :  (1, 4096)
-            # fc8 :  (1, 1000)
-            # prob :  (1, 1000)
-
     def _check_force_backward_true(self):
         """Check the force_backward flag is set in the caffe model definition.
 
@@ -242,16 +184,6 @@ class CaffeNet(Net):
             print 'at the data layer as well.\n\n'
 
 
-    def get_input_id(self):
-        """Get the identifier for the input layer.
-
-        Result: The type of this dentifier depends on the underlying
-            network library. However, the identifier returned by this
-            method is suitable as argument for other methods in this
-            class that expect a layer_id.
-
-        """
-        return self.net.inputs[0]
 
     def get_layer_ids(self, include_input = True):
         """Get the layer identifiers of the network layers.
@@ -273,38 +205,38 @@ class CaffeNet(Net):
             layers = layers[1:]
         return layers
 
-    def get_layer_n_tiles(self, layer_id):
-        """
-        ULF: only called by deepvis/app_state.py (1 time)
-        """
-        return self.net_layer_info[layer_id]['n_tiles']
 
+    def get_input_id(self):
+        """Get the identifier for the input layer.
 
-    def get_layer_tile_cols(self, layer_id):
-        """
-        ULF: only called by deepvis/app_state.py (3 times)
-        """
-        return self.net_layer_info[layer_id]['tile_cols']
+        Result: The type of this dentifier depends on the underlying
+            network library. However, the identifier returned by this
+            method is suitable as argument for other methods in this
+            class that expect a layer_id.
 
+        """
+        return self.net.inputs[0]
 
-    def get_layer_tiles_rc(self, layer_id):
-        """
-        ULF: only called by deepvis/app_state.py (1 time)
-        """
-        return self.net_layer_info[layer_id]['tiles_rc']
+    
+    def get_layer_shape(self,layer_id):
+        """Get the shape of the given layer.
 
+        Returns a tuples describing the shape of the layer:
+            Fully connected layer: 1-tuple, the number of neurons,
+            example: (1000, )
 
-    def get_input_data_shape(self):
+            Convolutional layer: n_filter x n_rows x n_columns,
+            example: (96, 55, 55)
         """
-        ULF: only called by deepvis/proc_thread.py (1 time),
-        and by self._init_data_mean()
-        """
-        # self.net.inputs[0] is 'data'
-        # (as net.inputs is a list ['data'])
-        return self.net.blobs[self.net.inputs[0]].data.shape[-2:]   # e.g. 227x227
+        return self.net.blobs[layer_id].data.shape[1:] # Chop off batch size
+
 
     def get_layer_data(self, layer_id, unit = None, flatten = False):
         """Provide activation data for a given layer.
+
+        Result:
+            An array of apropriate shape (see get_layer_shape()) containing
+            the layer activation values.
         """
         data = self.net.blobs[layer_id].data
         return data.flatten() if flatten else (data[0] if unit is None else data[0,unit])
@@ -312,31 +244,27 @@ class CaffeNet(Net):
 
     def get_layer_diff(self, layer_id, flatten = False):
         """Provide diff data for a given layer.
+
+        Result:
+            An array of apropriate shape (see get_layer_shape()) containing
+            the layer diff values.
+
+        ULF[todo]: find out what these diff-values actually are!
         """
         diff = self.net.blobs[layer_id].diff
         return diff.flatten() if flatten else diff[0]
 
 
-    def get_layer_zeros(self, layer_id):
-        """
-        ULF: only called by deepvis/proc_thread.py (1 time)
-        ULF: there should be a better solution
-        """
-        #hack:
-        #return self.net.blobs[backprop_layer].diff * 0
-        return self.net.blobs[layer_id].diff * 0
-
-
     def preproc_forward(self, img, data_hw):
-        """Prepare image data for processing.
+        """Prepare image data for processing and do forward propagation.
 
-        Uses caffe.transformer.preprocess
+        Uses caffe.transformer.preprocess and caffe.net.forward
 
         Arguments:
         img:
         data_hw
         
-        
+        ULF[todo]: find out what this exactly does!
         ULF: called by deepvis/proc_thread.py
         ULF: app_helper.py: provides a function with similar name
         """
@@ -386,22 +314,3 @@ class CaffeNet(Net):
         except AttributeError:
             print 'ERROR: required bindings (deconv_from_layer) not found! Try using the deconv-deep-vis-toolbox branch as described here: https://github.com/yosinski/deep-visualization-toolbox'
             raise
-
-
-    def get_input_gradient_as_image(self):
-        """
-        
-        ULF: only called by deepvis/proc_thread.py
-        """
-        #ULF[old]:
-        #grad_blob = self.net.blobs['data'].diff
-        #grad_blob = self.net.blobs[self.net.inputs[0]].diff
-        grad_blob = self.get_layer_diff(self.get_input_id())
-        print "debug[caffe]: grad_blob.shape =", grad_blob.shape
-        
-        # Manually deprocess (skip mean subtraction and rescaling)
-        #grad_img = self.net.deprocess('data', diff_blob)
-        #grad_blob = grad_blob[0]                    # bc01 -> c01
-        grad_blob = grad_blob.transpose((1,2,0))    # c01 -> 01c
-        grad_img = grad_blob[:, :, self._net_channel_swap_inv]  # e.g. BGR -> RGB
-        return grad_img

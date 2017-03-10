@@ -1,5 +1,6 @@
 import time
 import cv2
+import numpy as np
 
 from codependent_thread import CodependentThread
 from misc import WithTimer
@@ -107,7 +108,8 @@ class ProcThread(CodependentThread):
             if run_back:
                 #ULF[old]:
                 #diffs = self.net.blobs[backprop_layer].diff * 0
-                diffs = self.my_net.get_layer_zeros(backprop_layer)
+                #diffs = self.my_net.get_layer_zeros(backprop_layer)
+                diffs = np.zeros((1,) + self.my_net.get_layer_shape(backprop_layer))
                 #diffs[0][backprop_unit] = self.net.blobs[backprop_layer].data[0,backprop_unit]
                 diffs[0][backprop_unit] = self.my_net.get_layer_data(backprop_layer, unit = backprop_unit)
 

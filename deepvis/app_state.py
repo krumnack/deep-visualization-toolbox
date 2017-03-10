@@ -2,6 +2,9 @@ import time
 
 from threading import Lock
 
+from image_misc import get_tiles_height_width_ratio
+
+
 class VisAppState(object):
 
     def __init__(self, my_net, settings, bindings):
@@ -24,8 +27,8 @@ class VisAppState(object):
                 if self.settings.caffevis_filter_layers(name):
                     print '  Layer filtered out by caffevis_filter_layers: %s' % name
             self._layers = filter(lambda name: not self.settings.caffevis_filter_layers(name), self._layers)
-        #ULF[old]:
-        #self.net_layer_info = net_layer_info
+
+        self._populate_net_layer_info()
         self.layer_boost_indiv_choices = self.settings.caffevis_boost_indiv_choices   # 0-1, 0 is noop
         self.layer_boost_gamma_choices = self.settings.caffevis_boost_gamma_choices   # 0-inf, 1 is noop
         self.caffe_net_state = 'free'     # 'free', 'proc', or 'draw'
@@ -37,8 +40,6 @@ class VisAppState(object):
         self.quit = False
 
         self._reset_user_state()
-
-
 
 
     def _reset_user_state(self):
@@ -106,6 +107,60 @@ class VisAppState(object):
 
         self.drawing_stale = True
 
+
+    def _populate_net_layer_info(self):
+        """Prepare the layer infos.
+
+        For each layer, save the number of filters and precompute
+        tile arrangement.
+
+        The net_layer_info values are dictionaries with the following
+        entries:
+            isconv (Boolean)
+            data_shape (tuple of ints): shape of the layer
+            n_tiles (int): the number of tiles to display
+            tiles_rc (pair of ints): rows and columns
+            tile_rows (int): rows
+            tile_cols (int): columns
+
+        ULF[fixme]: maybe not really part of the application state but of the core application ...
+        """
+        print 'debug[net]: VisAppState._populate_net_layer_info: Populating layer info ...'
+        self.net_layer_info = {}
+        for layer_id in self.my_net.get_layer_ids():
+            self.net_layer_info[layer_id] = {}
+            layer_shape = self.my_net.get_layer_shape(layer_id)
+            print 'debug[net]: VisAppState._populate_net_layer_info:', layer_id, ": ", layer_shape
+
+            assert len(layer_shape) in (1,3), 'Expected either 1 for FC or 3 for conv layer'
+            self.net_layer_info[layer_id]['isconv'] = (len(layer_shape) == 3)
+            self.net_layer_info[layer_id]['data_shape'] = layer_shape
+            self.net_layer_info[layer_id]['n_tiles'] = layer_shape[0]
+            self.net_layer_info[layer_id]['tiles_rc'] = get_tiles_height_width_ratio(layer_shape[0], self.settings.caffevis_layers_aspect_ratio)
+            self.net_layer_info[layer_id]['tile_rows'] = self.net_layer_info[layer_id]['tiles_rc'][0]
+            self.net_layer_info[layer_id]['tile_cols'] = self.net_layer_info[layer_id]['tiles_rc'][1]
+
+            # Caffe layers (caffe_yos):
+            # Populating layer info ...
+            # data :  (1, 3, 227, 227)
+            # conv1 :  (1, 96, 55, 55)
+            # pool1 :  (1, 96, 27, 27)
+            # norm1 :  (1, 96, 27, 27)
+            # conv2 :  (1, 256, 27, 27)
+            # pool2 :  (1, 256, 13, 13)
+            # norm2 :  (1, 256, 13, 13)
+            # conv3 :  (1, 384, 13, 13)
+            # conv4 :  (1, 384, 13, 13)
+            # conv5 :  (1, 256, 13, 13)
+            # pool5 :  (1, 256, 6, 6)
+            # fc6 :  (1, 4096)
+            # fc7 :  (1, 4096)
+            # fc8 :  (1, 1000)
+            # prob :  (1, 1000)
+
+    def _get_layer_tiles_rc(self, layer_id = None):
+        """ULF: only called by (app.py)"""
+        return self.net_layer_info[self.layer if layer_id is None else layer_id]['tiles_rc']
         
     def handle_key(self, key):
         '''Handle keyboard events.
@@ -269,26 +324,18 @@ class VisAppState(object):
             if self.cursor_area == 'top':
                 self.cursor_area = 'bottom'
             else:
-                #ULF[old]:
-                #self.selected_unit += self.net_layer_info[self.layer]['tile_cols'] * dist
-                self.selected_unit += self.my_net.get_layer_tile_cols(self.layer) * dist
+                self.selected_unit += self.net_layer_info[self.layer]['tile_cols']
         elif direction == 'up':
             if self.cursor_area == 'top':
                 pass
             else:
-                #ULF[old]:
-                #self.selected_unit -= self.net_layer_info[self.layer]['tile_cols'] * dist
-                self.selected_unit -= self.my_net.get_layer_tile_cols(self.layer) * dist
+                self.selected_unit -= self.net_layer_info[self.layer]['tile_cols'] * dist
                 if self.selected_unit < 0:
-                    #ULF[old]:
-                    #self.selected_unit += self.net_layer_info[self.layer]['tile_cols']
-                    self.selected_unit += self.my_net.get_layer_tile_cols(self.layer)
+                    self.selected_unit += self.net_layer_info[self.layer]['tile_cols']
                     self.cursor_area = 'top'
 
     def _ensure_valid_selected(self):
-        #ULF[old]:
-        #n_tiles = self.net_layer_info[self.layer]['n_tiles']
-        n_tiles = self.my_net.get_layer_n_tiles(self.layer)
+        n_tiles = self.net_layer_info[self.layer]['n_tiles']
 
         # Forward selection
         self.selected_unit = max(0, self.selected_unit)
@@ -301,7 +348,3 @@ class VisAppState(object):
                 self.backprop_layer = self.layer
                 self.backprop_unit = self.selected_unit
                 self.back_stale = True    # If there is any change, back diffs are now stale
-
-
-
-

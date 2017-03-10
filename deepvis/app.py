@@ -413,7 +413,7 @@ class VisApp(BaseApp):
         n_tiles = layer_dat_3D.shape[0]
         #ULF[old]:
         #tile_rows,tile_cols = self.net_layer_info[self.state.layer]['tiles_rc']
-        tile_rows, tile_cols = self.my_net.get_layer_tiles_rc(self.state.layer)
+        tile_rows, tile_cols = self.state._get_layer_tiles_rc()
 
         display_3D_highres = None
         if self.state.pattern_mode:
